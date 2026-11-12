@@ -30,6 +30,10 @@
     I2C ADDRESS/BITS
     -----------------------------------------------------------------------*/
     #define BME280_ADDRESS                (0x77)
+
+    // Upper bounds for STATUS register polling (datasheet max measurement time is ~113 ms)
+    #define BME280_CALIBRATION_TIMEOUT_MS (1000)
+    #define BME280_MEASUREMENT_TIMEOUT_MS (500)
 /*=========================================================================*/
 
 /*=========================================================================
@@ -180,7 +184,7 @@ class Adafruit_BME280 {
 			 standby_duration duration     = STANDBY_MS_0_5
 			 );
                    
-        void takeForcedMeasurement();
+        bool takeForcedMeasurement();
         float readTemperature(void);
         float readPressure(void);
         float readHumidity(void);
@@ -196,6 +200,7 @@ class Adafruit_BME280 {
         uint8_t spixfer(uint8_t x);
 
         void      write8(byte reg, byte value);
+        bool      readRegisters(byte reg, uint8_t *buf, uint8_t len);
         uint8_t   read8(byte reg);
         uint16_t  read16(byte reg);
         uint32_t  read24(byte reg);
@@ -208,6 +213,7 @@ class Adafruit_BME280 {
         int32_t   t_fine;
 
         int8_t _cs, _mosi, _miso, _sck;
+        bool _readError;
 
         bme280_calib_data _bme280_calib;
 

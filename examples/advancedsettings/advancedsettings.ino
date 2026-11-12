@@ -128,7 +128,10 @@ void setup() {
 
 void loop() {
     // Only needed in forced mode! In normal mode, you can remove the next line.
-    bme.takeForcedMeasurement(); // has no effect in normal mode
+    // has no effect in normal mode; returns false if the sensor stops responding
+    if (!bme.takeForcedMeasurement()) {
+        Serial.println("BME280 measurement timed out");
+    }
     
     printValues();
     delay(delayTime);

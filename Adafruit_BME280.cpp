@@ -23,15 +23,15 @@
  PRIVATE FUNCTIONS
  ***************************************************************************/
 Adafruit_BME280::Adafruit_BME280()
-    : _cs(-1), _mosi(-1), _miso(-1), _sck(-1)
+    : _cs(-1), _mosi(-1), _miso(-1), _sck(-1), _readError(false)
 { }
 
 Adafruit_BME280::Adafruit_BME280(int8_t cspin)
-    : _cs(cspin), _mosi(-1), _miso(-1), _sck(-1)
+    : _cs(cspin), _mosi(-1), _miso(-1), _sck(-1), _readError(false)
 { }
 
 Adafruit_BME280::Adafruit_BME280(int8_t cspin, int8_t mosipin, int8_t misopin, int8_t sckpin)
-    : _cs(cspin), _mosi(mosipin), _miso(misopin), _sck(sckpin)
+    : _cs(cspin), _mosi(mosipin), _miso(misopin), _sck(sckpin), _readError(false)
 { }
 
 
@@ -88,8 +88,10 @@ bool Adafruit_BME280::init()
         }
     }
 
+    _readError = false;
+
     // check if sensor, i.e. the chip ID is correct
-    if (read8(BME280_REGISTER_CHIPID) != 0x60)
+    if (read8(BME280_REGISTER_CHIPID) != 0x60 || _readError)
         return false;
 
     // reset the device using soft-reset
@@ -100,10 +102,16 @@ bool Adafruit_BME280::init()
     delay(300);
 
     // if chip is still reading calibration, delay
-    while (isReadingCalibration())
-          delay(100);
+    uint32_t start = millis();
+    while (isReadingCalibration()) {
+        if (_readError || (millis() - start) >= BME280_CALIBRATION_TIMEOUT_MS)
+            return false;
+        delay(100);
+    }
 
     readCoefficients(); // read trimming parameters, see DS 4.2.2
+    if (_readError)
+        return false;
 
     setSampling(); // use defaults
 
@@ -194,29 +202,54 @@ void Adafruit_BME280::write8(byte reg, byte value) {
 
 /**************************************************************************/
 /*!
+    @brief  Reads len bytes starting at reg over I2C or SPI.
+            Returns false (and sets _readError) on a NACK or short I2C read.
+*/
+/**************************************************************************/
+bool Adafruit_BME280::readRegisters(byte reg, uint8_t *buf, uint8_t len)
+{
+    if (_cs == -1) {
+        _wire -> beginTransmission((uint8_t)_i2caddr);
+        _wire -> write((uint8_t)reg);
+        bool ok = (_wire -> endTransmission() == 0) &&
+                  (_wire -> requestFrom((uint8_t)_i2caddr, (byte)len) == len);
+        for (uint8_t i = 0; i < len; i++) {
+            int b = ok ? _wire -> read() : -1;
+            if (b < 0) {
+                ok = false;
+                b = 0;
+            }
+            buf[i] = (uint8_t)b;
+        }
+        while (_wire -> available())
+            _wire -> read();
+        if (!ok)
+            _readError = true;
+        return ok;
+    }
+
+    if (_sck == -1)
+        SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
+    digitalWrite(_cs, LOW);
+    spixfer(reg | 0x80); // read, bit 7 high
+    for (uint8_t i = 0; i < len; i++)
+        buf[i] = spixfer(0);
+    digitalWrite(_cs, HIGH);
+    if (_sck == -1)
+        SPI.endTransaction(); // release the SPI bus
+    return true;
+}
+
+
+/**************************************************************************/
+/*!
     @brief  Reads an 8 bit value over I2C or SPI
 */
 /**************************************************************************/
 uint8_t Adafruit_BME280::read8(byte reg) {
-    uint8_t value;
-    
-    if (_cs == -1) {
-        _wire -> beginTransmission((uint8_t)_i2caddr);
-        _wire -> write((uint8_t)reg);
-        _wire -> endTransmission();
-        _wire -> requestFrom((uint8_t)_i2caddr, (byte)1);
-        value = _wire -> read();
-    } else {
-        if (_sck == -1)
-            SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
-        digitalWrite(_cs, LOW);
-        spixfer(reg | 0x80); // read, bit 7 high
-        value = spixfer(0);
-        digitalWrite(_cs, HIGH);
-        if (_sck == -1)
-            SPI.endTransaction(); // release the SPI bus
-    }
-    return value;
+    uint8_t buf[1];
+    readRegisters(reg, buf, 1);
+    return buf[0];
 }
 
 
@@ -227,26 +260,9 @@ uint8_t Adafruit_BME280::read8(byte reg) {
 /**************************************************************************/
 uint16_t Adafruit_BME280::read16(byte reg)
 {
-    uint16_t value;
-
-    if (_cs == -1) {
-        _wire -> beginTransmission((uint8_t)_i2caddr);
-        _wire -> write((uint8_t)reg);
-        _wire -> endTransmission();
-        _wire -> requestFrom((uint8_t)_i2caddr, (byte)2);
-        value = (_wire -> read() << 8) | _wire -> read();
-    } else {
-        if (_sck == -1)
-            SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
-        digitalWrite(_cs, LOW);
-        spixfer(reg | 0x80); // read, bit 7 high
-        value = (spixfer(0) << 8) | spixfer(0);
-        digitalWrite(_cs, HIGH);
-        if (_sck == -1)
-            SPI.endTransaction(); // release the SPI bus
-    }
-
-    return value;
+    uint8_t buf[2];
+    readRegisters(reg, buf, 2);
+    return ((uint16_t)buf[0] << 8) | buf[1];
 }
 
 
@@ -290,46 +306,20 @@ int16_t Adafruit_BME280::readS16_LE(byte reg)
 /**************************************************************************/
 uint32_t Adafruit_BME280::read24(byte reg)
 {
-    uint32_t value;
-
-    if (_cs == -1) {
-        _wire -> beginTransmission((uint8_t)_i2caddr);
-        _wire -> write((uint8_t)reg);
-        _wire -> endTransmission();
-        _wire -> requestFrom((uint8_t)_i2caddr, (byte)3);
-
-        value = _wire -> read();
-        value <<= 8;
-        value |= _wire -> read();
-        value <<= 8;
-        value |= _wire -> read();
-    } else {
-        if (_sck == -1)
-            SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
-        digitalWrite(_cs, LOW);
-        spixfer(reg | 0x80); // read, bit 7 high
-
-        value = spixfer(0);
-        value <<= 8;
-        value |= spixfer(0);
-        value <<= 8;
-        value |= spixfer(0);
-
-        digitalWrite(_cs, HIGH);
-        if (_sck == -1)
-            SPI.endTransaction(); // release the SPI bus
-    }
-
-    return value;
+    uint8_t buf[3];
+    readRegisters(reg, buf, 3);
+    return ((uint32_t)buf[0] << 16) | ((uint32_t)buf[1] << 8) | buf[2];
 }
 
 
 /**************************************************************************/
 /*!
     @brief  Take a new measurement (only possible in forced mode)
+    @returns false if the sensor did not respond or did not finish the
+             measurement within BME280_MEASUREMENT_TIMEOUT_MS
 */
 /**************************************************************************/
-void Adafruit_BME280::takeForcedMeasurement()
+bool Adafruit_BME280::takeForcedMeasurement()
 {   
     // If we are in forced mode, the BME sensor goes back to sleep after each
     // measurement and we need to set it to forced mode once at this point, so
@@ -340,9 +330,17 @@ void Adafruit_BME280::takeForcedMeasurement()
         write8(BME280_REGISTER_CONTROL, _measReg.get());
         // wait until measurement has been completed, otherwise we would read
         // the values from the last measurement
-        while (read8(BME280_REGISTER_STATUS) & 0x08)
-		delay(1);
+        _readError = false;
+        uint32_t start = millis();
+        while (read8(BME280_REGISTER_STATUS) & 0x08) {
+            if (_readError || (millis() - start) >= BME280_MEASUREMENT_TIMEOUT_MS)
+                return false;
+            delay(1);
+        }
+        if (_readError)
+            return false;
     }
+    return true;
 }
 
 
